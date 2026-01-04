@@ -1,0 +1,91 @@
+clear; close all; clc;
+rng(1);
+
+N = 12;
+TTIs = 6000;
+TTI_dur = 1e-3;
+sim_time = TTIs * TTI_dur;
+PRB_bw = 180e3;
+nPRBs = 5;
+BW = PRB_bw * nPRBs;
+
+meanSNR_dB = linspace(-2, 20, N).';
+rho = 0.985;
+sigma_fading = 4;
+SNR_min = -20;
+SNR_max = 30;
+
+SNRdB = zeros(N, TTIs);
+for u = 1:N
+    SNRdB(u,1) = meanSNR_dB(u) + sigma_fading*randn;
+    for t = 2:TTIs
+        SNRdB(u,t) = rho * SNRdB(u,t-1) + (1-rho) * meanSNR_dB(u) + sigma_fading*randn;
+    end
+end
+SNRdB = max(min(SNRdB, SNR_max), SNR_min);
+
+snr2rate = @(snr_db) BW .* log2(1 + 10.^(snr_db/10));
+R_inst = snr2rate(SNRdB);
+
+throughput_bits_RR = zeros(N,1);
+throughput_bits_MaxCI = zeros(N,1);
+throughput_bits_PF = zeros(N,1);
+
+alpha = 0.01;
+Ravg_PF = BW .* log2(1 + 10.^(meanSNR_dB/10)); 
+Ravg_PF = Ravg_PF * 0.1; 
+
+rr_ptr = 1;
+for t = 1:TTIs
+    r_t = R_inst(:, t);
+
+    % Round-Robin scheduling
+    u_rr = rr_ptr;
+    throughput_bits_RR(u_rr) = throughput_bits_RR(u_rr) + r_t(u_rr) * TTI_dur;
+    rr_ptr = rr_ptr + 1;
+    if rr_ptr > N
+        rr_ptr = 1;
+    end
+
+    % Max C/I scheduling
+    [~, u_max] = max(r_t);
+    throughput_bits_MaxCI(u_max) = throughput_bits_MaxCI(u_max) + r_t(u_max) * TTI_dur;
+
+    % Proportional Fair scheduling
+    metric = r_t ./ Ravg_PF;
+    [~, u_pf] = max(metric);
+    throughput_bits_PF(u_pf) = throughput_bits_PF(u_pf) + r_t(u_pf) * TTI_dur;
+    Ravg_PF(u_pf) = (1 - alpha) * Ravg_PF(u_pf) + alpha * r_t(u_pf);
+end
+
+Tput_RR = throughput_bits_RR / sim_time;
+Tput_MaxCI = throughput_bits_MaxCI / sim_time;
+Tput_PF = throughput_bits_PF / sim_time;
+
+system_RR = sum(Tput_RR);
+system_MaxCI = sum(Tput_MaxCI);
+system_PF = sum(Tput_PF);
+
+J_RR = (sum(Tput_RR)^2) / (N * sum(Tput_RR.^2));
+J_MaxCI = (sum(Tput_MaxCI)^2) / (N * sum(Tput_MaxCI.^2));
+J_PF = (sum(Tput_PF)^2) / (N * sum(Tput_PF.^2));
+
+fprintf('System throughput (kbps): RR=%.2f  MaxCI=%.2f  PF=%.2f\n', system_RR/1e3, system_MaxCI/1e3, system_PF/1e3);
+fprintf('Fairness (Jain): RR=%.4f  MaxCI=%.4f  PF=%.4f\n', J_RR, J_MaxCI, J_PF);
+
+figure; bar([Tput_RR, Tput_MaxCI, Tput_PF] / 1e3);
+xlabel('User'); ylabel('Throughput (kbps)');
+legend('RR','Max C/I','PF'); title('Per-user throughput'); grid on;
+
+figure; bar([system_RR system_MaxCI system_PF] / 1e3);
+set(gca,'XTickLabel',{'RR','Max C/I','PF'});
+ylabel('Throughput (kbps)'); title('System throughput'); grid on;
+
+figure; bar([J_RR J_MaxCI J_PF]);
+set(gca,'XTickLabel',{'RR','Max C/I','PF'});
+ylabel('Jain Index'); ylim([0 1.05]); title('Fairness'); grid on;
+
+T = table((1:N).', Tput_RR/1e3, Tput_MaxCI/1e3, Tput_PF/1e3, ...
+    'VariableNames', {'User','RR_kbps','MaxCI_kbps','PF_kbps'});
+disp(T);
+
