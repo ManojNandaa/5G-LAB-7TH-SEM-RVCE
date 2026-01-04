@@ -1,0 +1,142 @@
+noTransportBlocks = 20;
+SNRdB = 5;                 % SNR in dB
+rng("default");
+
+%% DL-SCH parameters
+codeRate = 490/1024;
+NHARQProcesses = 4;        % Number of parallel HARQ processes
+rvSeq = [0 2 3 1];
+
+% Create DL-SCH encoder object
+encodeDLSCH = nrDLSCH;
+encodeDLSCH.MultipleHARQProcesses = true;
+encodeDLSCH.TargetCodeRate = codeRate;
+
+% Create DL-SCH decoder object
+decodeDLSCH = nrDLSCHDecoder;
+decodeDLSCH.MultipleHARQProcesses = true;
+decodeDLSCH.TargetCodeRate = codeRate;
+decodeDLSCH.LDPCDecodingAlgorithm = "Normalized min-sum";
+decodeDLSCH.MaximumLDPCIterationCount = 6;
+
+%% Numerology
+SCS = 15;
+NRB = 52;
+
+carrier = nrCarrierConfig;
+carrier.NSizeGrid = NRB;
+carrier.SubcarrierSpacing = SCS;
+carrier.CyclicPrefix = "Normal";   % "Normal" or "Extended"
+
+%% PDSCH configuration
+modulation = "16QAM";
+
+pdsch = nrPDSCHConfig;
+pdsch.Modulation = modulation;
+pdsch.PRBSet = 0:NRB-1;             % Full band allocation
+pdsch.NumLayers = 1;                % Single layer
+
+harqEntity = HARQEntity( ...
+    0:NHARQProcesses-1, ...
+    rvSeq, ...
+    pdsch.NumCodewords);
+
+%% Initialize variables
+noiseVar = 1 ./ (10.^(SNRdB/10));
+numBlkErr = 0;
+numRxBits = [];
+txedTrBlkSizes = [];
+
+%% Main transmission loop
+for nTrBlk = 1:noTransportBlocks
+
+    % One transport block per slot
+    carrier.NSlot = carrier.NSlot + 1;
+
+    % PDSCH indices and info
+    [~, pdschInfo] = nrPDSCHIndices(carrier, pdsch);
+
+    % Transport block size calculation
+    Xoh_PDSCH = 0;
+    trBlkSizes = nrTBS( ...
+        pdsch.Modulation, ...
+        pdsch.NumLayers, ...
+        numel(pdsch.PRBSet), ...
+        pdschInfo.NREPerPRB, ...
+        codeRate, ...
+        Xoh_PDSCH);
+
+    % New data and HARQ handling
+    for cwIdx = 1:pdsch.NumCodewords
+
+        if harqEntity.NewData(cwIdx)
+
+            % Generate transport block
+            trBlk = randi([0 1], trBlkSizes(cwIdx), 1);
+            setTransportBlock( ...
+                encodeDLSCH, ...
+                trBlk, ...
+                cwIdx-1, ...
+                harqEntity.HARQProcessID);
+
+            % Flush soft buffer if RV sequence expired
+            if harqEntity.SequenceTimeout(cwIdx)
+                resetSoftBuffer( ...
+                    decodeDLSCH, ...
+                    cwIdx-1, ...
+                    harqEntity.HARQProcessID);
+            end
+        end
+    end
+
+    % DL-SCH encoding
+    codedTrBlock = encodeDLSCH( ...
+        pdsch.Modulation, ...
+        pdsch.NumLayers, ...
+        pdschInfo.G, ...
+        harqEntity.RedundancyVersion, ...
+        harqEntity.HARQProcessID);
+
+    % PDSCH modulation
+    modOut = nrPDSCH(carrier, pdsch, codedTrBlock);
+
+    % AWGN channel
+    rxSig = awgn(modOut, SNRdB);
+
+    % PDSCH demodulation
+    rxLLR = nrPDSCHDecode(carrier, pdsch, rxSig, noiseVar);
+
+    % DL-SCH decoding
+    decodeDLSCH.TransportBlockLength = trBlkSizes;
+    [decbits, blkerr] = decodeDLSCH( ...
+        rxLLR, ...
+        pdsch.Modulation, ...
+        pdsch.NumLayers, ...
+        harqEntity.RedundancyVersion, ...
+        harqEntity.HARQProcessID);
+
+    % Throughput accounting
+    if any(trBlkSizes ~= 0)
+        numRxBits = [numRxBits, trBlkSizes .* (1 - blkerr)];
+    end
+
+    txedTrBlkSizes = [txedTrBlkSizes, trBlkSizes];
+
+    if blkerr
+        numBlkErr = numBlkErr + 1;
+    end
+
+    % HARQ update
+    statusReport = updateAndAdvance( ...
+        harqEntity, ...
+        blkerr, ...
+        trBlkSizes, ...
+        pdschInfo.G);
+
+    disp("Slot " + nTrBlk + ". " + statusReport);
+end
+
+%% Throughput results
+maxThroughput = sum(txedTrBlkSizes);
+totalNumRxBits = sum(numRxBits, 2);
+
