@@ -1,0 +1,196 @@
+% mimo_siso_simo_miso.m
+% Full simulation of SISO, SIMO (MRC) and MISO (beamforming)
+% 4-QAM (QPSK) baseband, Rayleigh fading, AWGN, BER vs Eb/N0
+% Author: ChatGPT (example)
+clear; close all; clc;
+rng(0); % for reproducibility
+
+%% Simulation parameters
+modOrder = 4;                    % 4-QAM (QPSK)
+k = log2(modOrder);              % bits per symbol
+numSymbolsPerPacket = 2000;      % symbols per packet
+numPackets = 200;                % number of independent packets (channel realizations)
+EbNo_dB = 0:2:20;                % Eb/N0 range (dB)
+numEbNo = numel(EbNo_dB);
+
+% Antenna configurations to test:
+M_list = [1, 2, 4];              % evaluate M=1,2,4 for SIMO and MISO
+% Note: M=1 corresponds to SISO (no combining/beamforming)
+
+% Preallocate results
+BER_siso = zeros(1, numEbNo);
+BER_simo = zeros(length(M_list), numEbNo);
+BER_miso = zeros(length(M_list), numEbNo);
+
+% QAM symbol mapping (unit average power)
+% Use MATLAB's qammod/qamdemod if available, otherwise manual QPSK mapping
+use_comm_toolbox = exist('qammod','file') == 2;
+
+%% Main loop
+totalBits = numPackets * numSymbolsPerPacket * k;
+
+for idxEb = 1:numEbNo
+    EbNo = EbNo_dB(idxEb);
+    
+    totalErrors_siso = 0;
+    totalErrors_simo = zeros(1, length(M_list));
+    totalErrors_miso = zeros(1, length(M_list));
+    
+    % convert to Es/No for symbol energy = 1
+    EsNo_dB = EbNo + 10*log10(k);
+    noiseVarPerDim = 1/(2*10^(EsNo_dB/10)); % variance per real dimension (complex noise uses this)
+    % complex Gaussian noise: n = sqrt(noiseVarPerDim)*(randn + 1j*randn)
+    
+    for pkt = 1:numPackets
+        % Generate random bits and map to symbols
+        bits = randi([0 1], numSymbolsPerPacket*k, 1);
+        % reshape to groups of k bits
+        reshaped = reshape(bits, k, []).';
+        
+        if use_comm_toolbox
+            symbols = qammod(bi2de(reshaped,'left-msb'), modOrder, 'UnitAveragePower', true);
+        else
+            % Manual QPSK mapping Gray-coded, unit average power
+            % bit pairs -> symbols: 00->(1+1j)/sqrt(2), 01->(-1+1j)/sqrt(2), 11->(-1-1j)/sqrt(2), 10->(1-1j)/sqrt(2)
+            dec = bi2de(reshaped,'left-msb');
+            s_map = [(1+1j),( -1+1j ),(-1-1j),(1-1j)]/sqrt(2);
+            symbols = s_map(dec+1).';
+        end
+        
+        % --- SISO (M=1) ---
+        % Rayleigh channel (flat) for each symbol: use block-fading per packet for simplicity (same h for all symbols in packet)
+        h_siso = (randn + 1j*randn)/sqrt(2);
+        % transmit through channel and add noise
+        noise = sqrt(noiseVarPerDim)*(randn(size(symbols)) + 1j*randn(size(symbols)));
+        rx_siso = h_siso * symbols + noise;
+        % equalize (perfect channel knowledge)
+        rx_eq = rx_siso / h_siso;
+        % demodulate
+        if use_comm_toolbox
+            rx_dec = qamdemod(rx_eq, modOrder, 'OutputType', 'bit', 'UnitAveragePower', true);
+        else
+            % Manual QPSK demod
+            % decision by real/imag sign
+            rx_sym = rx_eq;
+            decs = zeros(length(rx_sym),1);
+            decs(real(rx_sym)<0 & imag(rx_sym)>0) = 1; % 01 -> index 2 (dec 1)
+            decs(real(rx_sym)<0 & imag(rx_sym)<0) = 2; % 11 -> dec 2
+            decs(real(rx_sym)>0 & imag(rx_sym)<0) = 3; % 10 -> dec 3
+            % mapping to 0..3 consistent with s_map index
+            % convert to bits:
+            rx_bits = de2bi(decs, k, 'left-msb')';
+            rx_dec = rx_bits(:);
+        end
+        if use_comm_toolbox
+            rx_bits = rx_dec(:);
+        end
+        totalErrors_siso = totalErrors_siso + sum(bits ~= rx_bits);
+        
+        % --- SIMO (MRC receive combining) & MISO (beamforming) for various M ---
+        for mIdx = 1:length(M_list)
+            M = M_list(mIdx);
+            if M==1
+                % for M=1 we already did SISO, but also include it in arrays for consistency:
+                % SIMO (M=1) same as SISO
+                totalErrors_simo(mIdx) = totalErrors_simo(mIdx) + sum(bits ~= rx_bits);
+                totalErrors_miso(mIdx) = totalErrors_miso(mIdx) + sum(bits ~= rx_bits);
+                continue;
+            end
+            
+            % --- SIMO ---
+            % Rayleigh Mx1 channel (for each receive antenna), block-fading per packet
+            h_simo = (randn(1,M) + 1j*randn(1,M))/sqrt(2);
+            % Received at each antenna: y_i = h_i * s + n_i
+            noise_matrix = sqrt(noiseVarPerDim)*(randn(numSymbolsPerPacket, M) + 1j*randn(numSymbolsPerPacket, M));
+            % replicate symbols across columns
+            s_mat = repmat(symbols, 1, M);
+            y_mat = s_mat .* repmat(h_simo, numSymbolsPerPacket, 1) + noise_matrix;
+            % MRC combining: sum conj(h_i)*y_i across antennas
+            y_comb = sum(conj(repmat(h_simo, numSymbolsPerPacket,1)) .* y_mat, 2);
+            % normalization by sum |h_i|^2 (zero-forcing normalization)
+            denom = sum(abs(h_simo).^2);
+            rx_eq_simo = y_comb / denom; % scales to symbol
+            % demodulate
+            if use_comm_toolbox
+                rx_dec_simo = qamdemod(rx_eq_simo, modOrder, 'OutputType', 'bit', 'UnitAveragePower', true);
+                rx_bits_simo = rx_dec_simo(:);
+            else
+                rx_sym = rx_eq_simo;
+                decs = zeros(length(rx_sym),1);
+                decs(real(rx_sym)<0 & imag(rx_sym)>0) = 1;
+                decs(real(rx_sym)<0 & imag(rx_sym)<0) = 2;
+                decs(real(rx_sym)>0 & imag(rx_sym)<0) = 3;
+                rx_bits_simo = de2bi(decs, k, 'left-msb')';
+                rx_bits_simo = rx_bits_simo(:);
+            end
+            totalErrors_simo(mIdx) = totalErrors_simo(mIdx) + sum(bits ~= rx_bits_simo);
+            
+            % --- MISO (Transmit beamforming) ---
+            % Rayleigh Mx1 channel (Tx antennas -> single Rx)
+            h_miso = (randn(M,1) + 1j*randn(M,1))/sqrt(2);
+            % beamforming weights: conjugate of channel normalized (maximum ratio transmission)
+            w = conj(h_miso) / norm(h_miso);
+            % Apply beamforming: each transmit antenna sends w_i * s
+            % For each symbol, transmitted vector is w * s(n)
+            % Received: y = h^T * (w * s) + n = (h^T * w) * s + n
+            hw_gain = (h_miso.') * w; % scalar complex gain (== norm(h)^2 / norm(h) = norm(h))
+            noise_miso = sqrt(noiseVarPerDim)*(randn(numSymbolsPerPacket,1) + 1j*randn(numSymbolsPerPacket,1));
+            rx_miso = hw_gain * symbols + noise_miso;
+            % equalize by hw_gain
+            rx_eq_miso = rx_miso / hw_gain;
+            % demodulate
+            if use_comm_toolbox
+                rx_dec_miso = qamdemod(rx_eq_miso, modOrder, 'OutputType', 'bit', 'UnitAveragePower', true);
+                rx_bits_miso = rx_dec_miso(:);
+            else
+                rx_sym = rx_eq_miso;
+                decs = zeros(length(rx_sym),1);
+                decs(real(rx_sym)<0 & imag(rx_sym)>0) = 1;
+                decs(real(rx_sym)<0 & imag(rx_sym)<0) = 2;
+                decs(real(rx_sym)>0 & imag(rx_sym)<0) = 3;
+                rx_bits_miso = de2bi(decs, k, 'left-msb')';
+                rx_bits_miso = rx_bits_miso(:);
+            end
+            totalErrors_miso(mIdx) = totalErrors_miso(mIdx) + sum(bits ~= rx_bits_miso);
+        end % M loop
+        
+    end % packet loop
+    
+    % store BERs: total errors / total bits tested
+    BER_siso(idxEb) = totalErrors_siso / totalBits;
+    for mIdx = 1:length(M_list)
+        BER_simo(mIdx, idxEb) = totalErrors_simo(mIdx) / totalBits;
+        BER_miso(mIdx, idxEb) = totalErrors_miso(mIdx) / totalBits;
+    end
+    
+    fprintf('Eb/N0 = %2d dB done\n', EbNo);
+end
+
+%% Plot results
+figure; hold on; grid on; box on;
+semilogy(EbNo_dB, BER_siso, '-o','LineWidth',1.5,'DisplayName','SISO (M=1)');
+colors = lines(length(M_list));
+for mIdx = 1:length(M_list)
+    M = M_list(mIdx);
+    if M==1, continue; end
+    semilogy(EbNo_dB, squeeze(BER_simo(mIdx,:)), '-s','LineWidth',1.5, 'DisplayName', sprintf('SIMO MRC M=%d',M));
+    semilogy(EbNo_dB, squeeze(BER_miso(mIdx,:)), '--d','LineWidth',1.5, 'DisplayName', sprintf('MISO BF M=%d',M));
+end
+xlabel('Eb/N0 (dB)');
+ylabel('BER');
+title('BER vs Eb/N0: SISO, SIMO (MRC), MISO (Beamforming) -- 4-QAM');
+legend('Location','southwest');
+set(gca,'YScale','log');
+ylim([1e-5 1]);
+grid on;
+
+%% Display summary table
+fprintf('\nSummary at Eb/N0 = %d dB\n', EbNo_dB(end));
+fprintf('Case\t\tM\tBER\n');
+fprintf('SISO\t\t1\t%.3e\n', BER_siso(end));
+for mIdx = 1:length(M_list)
+    M = M_list(mIdx);
+    fprintf('SIMO-MRC\t%d\t%.3e\n', M, BER_simo(mIdx,end));
+    fprintf('MISO-BF\t\t%d\t%.3e\n', M, BER_miso(mIdx,end));
+end
+
