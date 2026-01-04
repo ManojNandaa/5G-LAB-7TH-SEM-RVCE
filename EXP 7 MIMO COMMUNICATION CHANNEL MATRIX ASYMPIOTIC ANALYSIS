@@ -1,0 +1,130 @@
+%%
+% We start by defining some common simulation parameters
+frmLen      = 100;        % frame length
+numPackets = 1000;       % number of packets
+EbNo       = 0:2:20;     % Eb/No varying to 20 dB
+N          = 2;          % maximum number of Tx antennas
+M          = 2;          % maximum number of Rx antennas
+P          = 2;          % modulation order
+
+%%
+% Create OSTBC encoder/combiner
+ostbcEnc  = comm.OSTBCEncoder;
+ostbcComb = comm.OSTBCCombiner;
+
+% Convert Eb/No to SNR
+SNR = convertSNR(EbNo,"ebno","BitsPerSymbol",1);
+
+% Error rate calculators
+errorCalc1 = comm.ErrorRate;
+errorCalc2 = comm.ErrorRate;
+errorCalc3 = comm.ErrorRate;
+
+% Fix RNG for repeatability
+s = rng(55408);
+
+% Pre-allocate
+H            = zeros(frmLen,N,M);
+ber_noDiver  = zeros(3,length(EbNo));
+ber_Alamouti = zeros(3,length(EbNo));
+ber_MaxRatio = zeros(3,length(EbNo));
+ber_thy2     = zeros(1,length(EbNo));
+
+%%
+% Figure setup
+fig = figure;
+grid on;
+ax = fig.CurrentAxes;
+hold(ax,'on');
+
+ax.YScale = 'log';
+xlim(ax,[EbNo(1) EbNo(end)]);
+ylim(ax,[1e-4 1]);
+xlabel(ax,'Eb/No (dB)');
+ylabel(ax,'BER');
+title(ax,'Transmit vs. Receive Diversity');
+
+%%
+% Loop over Eb/No
+for idx = 1:length(EbNo)
+
+    reset(errorCalc1);
+    reset(errorCalc2);
+    reset(errorCalc3);
+
+    for packetIdx = 1:numPackets
+
+        % Generate data
+        data = randi([0 P-1], frmLen, 1);
+
+        % Modulation
+        modData = pskmod(data,P);
+
+        % Alamouti encoding
+        encData = ostbcEnc(modData);
+
+        % Channel generation
+        H(1:N:end,:,:) = ...
+            (randn(frmLen/2,N,M) + 1i*randn(frmLen/2,N,M))/sqrt(2);
+        H(2:N:end,:,:) = H(1:N:end,:,:);
+
+        % Channel subsets
+        H11 = H(:,1,1);
+        H21 = H(:,:,1)/sqrt(2);
+        H12 = squeeze(H(:,1,:));
+
+        % Channel output
+        chanOut11 = H11 .* modData;
+        chanOut21 = sum(H21 .* encData,2);
+        chanOut12 = H12 .* repmat(modData,1,2);
+
+        % AWGN
+        rxSig11 = awgn(chanOut11,SNR(idx));
+        rxSig21 = awgn(chanOut21,SNR(idx));
+        rxSig12 = awgn(chanOut12,SNR(idx));
+
+        % Alamouti combining
+        decData = ostbcComb(rxSig21,H21);
+
+        % Detection
+        demod11 = pskdemod(rxSig11 .* conj(H11),P);
+        demod21 = pskdemod(decData,P);
+        demod12 = pskdemod(sum(rxSig12 .* conj(H12),2),P);
+
+        % BER update
+        ber_noDiver(:,idx)  = errorCalc1(data,demod11);
+        ber_Alamouti(:,idx) = errorCalc2(data,demod21);
+        ber_MaxRatio(:,idx) = errorCalc3(data,demod12);
+
+    end
+
+    % Theoretical BER
+    ber_thy2(idx) = berfading(EbNo(idx),'psk',2,2);
+
+    % Plot
+    semilogy(ax, ...
+        EbNo(1:idx), ber_noDiver(1,1:idx),'r*', ...
+        EbNo(1:idx), ber_Alamouti(1,1:idx),'go', ...
+        EbNo(1:idx), ber_MaxRatio(1,1:idx),'bs', ...
+        EbNo(1:idx), ber_thy2(1:idx),'m');
+
+    legend(ax, ...
+        'No Diversity (1Tx,1Rx)', ...
+        'Alamouti (2Tx,1Rx)', ...
+        'Maximal Ratio (1Tx,2Rx)', ...
+        'Theoretical 2nd Order');
+
+    drawnow;
+end
+
+%%
+% Curve fitting
+fitBER11 = berfit(EbNo,ber_noDiver(1,:));
+fitBER21 = berfit(EbNo,ber_Alamouti(1,:));
+fitBER12 = berfit(EbNo,ber_MaxRatio(1,:));
+
+semilogy(ax,EbNo,fitBER11,'r',EbNo,fitBER21,'g',EbNo,fitBER12,'b');
+hold(ax,'off');
+
+% Restore RNG
+rng(s);
