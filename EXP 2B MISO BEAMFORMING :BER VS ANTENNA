@@ -1,0 +1,70 @@
+clear; close all; clc;
+rng(1);
+
+M = 64;
+k = log2(M);
+distances_m = [50 100 200 500];
+antenna_counts = [1 2 4 8 16 32 64 128];
+Ptx_dBm = 40;
+BW = 10e6;
+noiseFigure_dB = 5;
+numPackets = 50;
+numSymbolsPerPacket = 1024;
+
+kT = -174;
+noisePower_dBm = kT + 10*log10(BW) + noiseFigure_dB;
+noisePower_W = 10^((noisePower_dBm-30)/10);
+Ptx_W = 10^((Ptx_dBm-30)/10);
+
+BER = zeros(length(distances_m), length(antenna_counts));
+pathloss_dB = @(d) 128.1 + 37.6*log10(d/1000);
+
+for id = 1:length(distances_m)
+    d = distances_m(id);
+    PL = 10^(pathloss_dB(d)/10);
+
+    for ia = 1:length(antenna_counts)
+        Nt = antenna_counts(ia);
+        totalErrors = 0;
+        totalBits = 0;
+
+        for p = 1:numPackets
+            bits = randi([0 1], numSymbolsPerPacket*k, 1);
+            symIdx = bi2de(reshape(bits, k, []).', 'left-msb');
+
+            s = qammod(symIdx, M, 'gray');
+            s = s / sqrt(mean(abs(s).^2));
+
+            h = (randn(Nt,1) + 1j*randn(Nt,1))/sqrt(2);
+            g = norm(h);
+            scale = sqrt(Ptx_W) * g / sqrt(PL);
+
+            y = scale*s + sqrt(noisePower_W/2)*(randn(length(s),1)+1j*randn(length(s),1));
+            y2 = y ./ scale;
+
+            rxIdx = qamdemod(y2, M, 'gray');
+            rxBitsMat = de2bi(rxIdx, k, 'left-msb');
+            rx = reshape(rxBitsMat.', [], 1);
+
+            totalErrors = totalErrors + sum(bits ~= rx);
+            totalBits = totalBits + length(bits);
+        end
+
+        BER(id, ia) = totalErrors / totalBits;
+    end
+end
+
+figure;
+hold on; grid on; box on;
+for id = 1:length(distances_m)
+    semilogy(antenna_counts, BER(id,:), 'LineWidth', 1.6);
+end
+set(gca,'XScale','log','XTick',antenna_counts);
+xlabel('Number of Transmit Antennas');
+ylabel('BER');
+title('BER vs Number of Transmit Antennas');
+legend('50 m','100 m','200 m','500 m','Location','southwest');
+hold off;
+
+T = array2table(BER, 'VariableNames', compose("Nt%d",antenna_counts), 'RowNames', compose("%dm", distances_m));
+disp(T);
