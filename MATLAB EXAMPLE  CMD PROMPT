@@ -1,7 +1,10 @@
 EXP 2:  openExample('phased/MIMOBeamformingExample')  
 
-EXP 3:openExample('5g/NRFDDSchedulingPerformanceEvaluationExample') 
-(same as lab exp but the implementation is done specifically under NR FDD  (duplexing mode in 5G.)
+EXP 3:
+
+EXP 4:
+
+EXP 5:
 
 EXP 6:openExamp('5g/Modeling5GNRTransportChannelsWithHARQExample')  
 
@@ -9,6 +12,8 @@ EXP 7:openExample('comm/IntroductionToMimoSystemExample')
 
 EXP 8:openExample('5g/NRIntercellInterferenceModelingExample')  
 
+EXP 9: openExample('5g/NRFDDSchedulingPerformanceEvaluationExample')
 
+EXP 10:openExample('5g/NewRadioCSIRSMeasurementsExample')
 
 
